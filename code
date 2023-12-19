@@ -1,0 +1,93 @@
+
+-- defined list of audience deal identifiers, 1965 rows, table b
+with defined_deal_ids as (
+  select
+    deal_id as audience_deal_identifier
+  from
+  -- do zmiany na inna tabele --> spojrzec na raport
+    `rtb-inventory-datastudio.personal_mg.20230731_AllAudienceDeals`
+)
+
+-- table with deal ID and deal_identifier, limited to identifiers from defined_deal_ids, table d
+, audience_deals_info as (
+  select
+    cast(id as string) id
+    , ssp
+    , name
+    , status
+    , deal_identifier
+    , added_date
+    , change_date
+  from
+    `profound-surf-104314.core_data_eu.private_deals_sql`
+  inner join defined_deal_ids ON deal_identifier = audience_deal_identifier
+)
+
+-- array with deal IDs only
+, audience_deal_ids as (
+  select
+    array(
+      select distinct
+        cast(id as string) id_string
+      from
+        audience_deals_info
+    ) audience_deal_ids_array
+)
+
+-- campaign_id + audience_deal_ids_nested per row
+, allowed_deals_nested as (
+  SELECT
+    id campaign_id,
+    JSON_EXTRACT_ARRAY(data, '$.targetingPolicy.dealPolicy.allowedDeals') AS allowed_deals
+  FROM
+    `profound-surf-104314.core_data_eu.campaigns`
+  WHERE
+    ARRAY_LENGTH(JSON_EXTRACT_ARRAY(data, '$.targetingPolicy.dealPolicy.allowedDeals')) >= 1
+)
+
+-- campaign_id plus allowed_deal_id per row
+, allowed_deals_unnested as (
+  SELECT
+    campaign_id,
+    allowed_deals
+  FROM
+    allowed_deals_nested
+  CROSS JOIN unnest(allowed_deals_nested.allowed_deals) as allowed_deals
+)
+
+-- create key [campaignId_allowedDealId], table c
+, allowed_deals_with_campaign_ids as (
+  SELECT
+    concat(cast(campaign_id as string), "_", allowed_deals) as campaign_id_deal_id
+  FROM
+    allowed_deals_unnested
+)
+
+-- spend table
+, spend_allowed_deals as (
+  SELECT
+    a.bid_details.bid_response.deal_identifier as deal_id,
+    a.bid_details.bid_response.ad.advertiser.id as advertiser_id,
+    a.bid_details.bid_response.ad.campaign.id as campaign_id,
+    COUNT(*) * 100 as imprs,
+    SUM(a.winning_price.value * a.winning_price.usd_exchange_rate) * 100 AS spend_usd
+  FROM
+    `profound-surf-104314.core_data_eu.all_impressions_sample1` a
+  INNER JOIN
+    `rtb-inventory-datastudio.personal_mg.20230731_AllAudienceDeals` b
+    ON a.bid_details.bid_response.deal_identifier = b.deal_id
+  INNER JOIN
+    allowed_deals_unnested c
+    ON a.bid_details.bid_response.ad.campaign.id = c.campaign_id
+  INNER JOIN
+    audience_deals_info d
+    ON c.allowed_deals = d.id
+  WHERE
+    day BETWEEN '2023-01-01' AND '2023-07-31'
+  GROUP BY
+    deal_id, advertiser_id, campaign_id
+)
+
+SELECT *
+FROM
+  spend_allowed_deals
